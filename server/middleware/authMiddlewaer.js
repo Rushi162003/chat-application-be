@@ -19,7 +19,9 @@ const protect = async (req, res, next) => {
         next()
 
     } catch (error) {
-        return res.status(401).json({ message: 'Token invalid or expired' })
+        console.log("Error in protect middleware: ", error)
+
+        return res.status(req.statusCode ?? 401).json({ message: error.message ?? "Token invalid or expired" })
     }
 }
 

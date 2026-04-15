@@ -29,9 +29,12 @@ exports.signup = async (req, res) => {
     }
     try {
         const hashedPassword = await bcrypt.hash(password, 10)
+        console.log("Hashed password: ", name, email)
         const newUser = await User.create({ name, email, password: hashedPassword })
-        res.status(200).json({ message: 'User created successfully', user: newUser })
+        const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET)
+        res.status(200).json({ message: 'Login successful', token })
     } catch (error) {
+        console.log("Error in signup controller: ", error)
         res.status(500).json({ message: 'User creation failed' })
     }
 }
