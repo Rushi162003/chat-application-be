@@ -42,6 +42,7 @@ const initSocket = (httpServer) => {
     io.on("connection", (socket) => {
         const userId = socket.user._id.toString();
         console.log(`User connected: ${socket.id}`);
+        socket.join(userId);
 
         if (!onlineUsers.has(userId)) onlineUsers.set(userId, new Set());
         onlineUsers.get(userId).add(socket.id);
@@ -54,7 +55,7 @@ const initSocket = (httpServer) => {
             const isParticipant = await Chat.findOne({ _id: chatId, participants: { $in: [socket.user._id] } });
             if (!isParticipant) return socket.emit("error", "You are not a participant of this chat");
 
-            socket.join(chatId);
+            socket.join(String(chatId));
         });
 
         socket.on("send-message", async ({ chatId, text }) => {
@@ -65,7 +66,51 @@ const initSocket = (httpServer) => {
 
             const message = await Message.create({ chatId, senderId: socket.user._id, text });
             await Chat.findByIdAndUpdate(chatId, { lastMessage: message._id, updatedAt: new Date() });
-            io.to(chatId.toString()).emit("receive-message", message);
+            const chat = await Chat.findById(chatId);
+            const participantIds = chat.participants.map(participant => participant.toString());
+            participantIds.forEach((participantId) => {
+                io.to(participantId).emit("receive-message", message);
+            });
+        });
+
+        const emitReceiptToParticipants = async (chatId, payload) => {
+            const chat = await Chat.findById(chatId).select("participants");
+            if (!chat) return;
+            chat.participants.forEach((p) => {
+                io.to(p.toString()).emit("message-receipt", payload);
+            });
+        };
+
+        socket.on("recive-message", async ({ chatId, messageId }) => {
+            if (!chatId || !messageId) return;
+            const message = await Message.findByIdAndUpdate(
+                messageId,
+                { $addToSet: { deliveredTo: socket.user._id } },
+                { new: true }
+            );
+            if (!message) return;
+            await emitReceiptToParticipants(chatId, { type: "delivered", chatId: String(chatId), message });
+        });
+
+        socket.on("read-message", async ({ chatId, messageId }) => {
+            if (!chatId || !messageId) return;
+            const chatRoom = String(chatId);
+            if (!socket.rooms.has(chatRoom)) {
+                return socket.emit("error", "Join the chat before marking messages as read");
+            }
+            const isParticipant = await Chat.findOne({ _id: chatId, participants: { $in: [socket.user._id] } });
+            if (!isParticipant) return socket.emit("error", "You are not a participant of this chat");
+
+            const existing = await Message.findById(messageId).select("chatId");
+            if (!existing || existing.chatId.toString() !== chatRoom) return;
+
+            const message = await Message.findByIdAndUpdate(
+                messageId,
+                { $addToSet: { readBy: socket.user._id } },
+                { new: true }
+            );
+            if (!message) return;
+            await emitReceiptToParticipants(chatId, { type: "read", chatId: chatRoom, message });
         });
 
         socket.on("disconnect", () => {

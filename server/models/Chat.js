@@ -7,6 +7,7 @@ const chatSchema = new mongoose.Schema({
     name: String,
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
+    unreadCount: { type: Number, default: 0 },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Chat', chatSchema);
