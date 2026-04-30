@@ -39,7 +39,7 @@ const initSocket = (httpServer) => {
         }
     })
 
-    io.on("connection", (socket) => {
+    io.on("connection", async (socket) => {
         const userId = socket.user._id.toString();
         console.log(`User connected: ${socket.id}`);
         socket.join(userId);
@@ -48,6 +48,27 @@ const initSocket = (httpServer) => {
         onlineUsers.get(userId).add(socket.id);
 
         broadcastOnlineUsers();
+
+        // Mark delivered only for messages in chats this user is in, not sent by them, not already delivered.
+        try {
+            const userObjectId = socket.user._id;
+            const participantChats = await Chat.find({ participants: userObjectId }).select("_id").lean();
+            const chatIds = participantChats.map((c) => c._id);
+            if (chatIds.length > 0) {
+                await Message.updateMany(
+                    {
+                        chatId: { $in: chatIds },
+                        senderId: { $ne: userObjectId },
+                        $expr: {
+                            $not: { $in: [userObjectId, { $ifNull: ["$deliveredTo", []] }] },
+                        },
+                    },
+                    { $addToSet: { deliveredTo: userObjectId } }
+                );
+            }
+        } catch (e) {
+            console.error("Bulk delivered on connect failed:", e);
+        }
 
         socket.on("join-chat", async (chatId) => {
             if (!chatId) return socket.emit("error", "Chat ID is required");
@@ -122,6 +143,17 @@ const initSocket = (httpServer) => {
                 onlineUsers.delete(userId);
                 broadcastOnlineUsers();
             }
+        });
+
+        socket.on("message-delivered", async ({ chatId, messageId }) => {
+            if (!chatId || !messageId) return;
+            const message = await Message.findByIdAndUpdate(
+                messageId,
+                { $addToSet: { deliveredTo: socket.user._id } },
+                { new: true }
+            );
+            if (!message) return;
+            await emitReceiptToParticipants(chatId, { type: "delivered", chatId: String(chatId), message });
         });
     });
 
