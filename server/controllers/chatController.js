@@ -42,7 +42,7 @@ exports.getChats = async (req, res) => {
             const participants = await User.find({ _id: { $in: chat.participants } }).select('name');
             const receiver = participants.find(participant => participant._id.toString() !== req.user._id.toString());
             const sender = participants.find(participant => participant._id.toString() === req.user._id.toString());
-            const unreadCount = await Message.countDocuments({ chatId: chat._id,  readBy: { $ne: req.user._id }, senderId: { $ne: req.user._id } });
+            const unreadCount = await Message.countDocuments({ chatId: chat._id, readBy: { $ne: req.user._id }, senderId: { $ne: req.user._id } });
             return { ...chat._doc, lastMessage, receiver, sender, unreadCount };
         }));
         console.log("chatsWithLastMessage: ", chatsWithLastMessage);
@@ -96,3 +96,12 @@ exports.getMessages = async (req, res) => {
         return res.status(500).json({ message: 'Something went wrong' });
     }
 };
+
+exports.deleteMessage = async (req, res) => {
+    try {
+        const message = await Message.findByIdAndDelete(req.params.id);
+        return res.status(200).json({ message: 'Message deleted successfully' });
+    } catch (error) {
+        return res.status(500).json({ message: 'Something went wrong' });
+    }
+}

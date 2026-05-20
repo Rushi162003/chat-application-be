@@ -155,9 +155,33 @@ const initSocket = (httpServer) => {
             if (!message) return;
             await emitReceiptToParticipants(chatId, { type: "delivered", chatId: String(chatId), message });
         });
+
+        socket.on("edit-message", async ({ chatId, messageId, text }) => {
+            if (!chatId || !messageId || !text) return;
+            const message = await Message.findByIdAndUpdate(messageId, { text }, { new: true });
+            if (!message) return;
+            await Chat.findByIdAndUpdate(chatId, { lastMessage: message._id, updatedAt: new Date() });
+            const chat = await Chat.findById(chatId);
+            const participantIds = chat.participants.map(participant => participant.toString());
+            participantIds.forEach((participantId) => {
+                io.to(participantId).emit("message-edited", message);
+            });
+            await emitReceiptToParticipants(chatId, { type: "edited", chatId: String(chatId), message });
+        });
+
+        socket.on("delete-message", async ({ chatId, messageId }) => {
+            if (!chatId || !messageId) return;
+            const message = await Message.findByIdAndDelete(messageId);
+            if (!message) return;
+            await Chat.findByIdAndUpdate(chatId, { $pull: { messages: messageId } });
+            const chat = await Chat.findById(chatId);
+            const participantIds = chat.participants.map(participant => participant.toString());
+            participantIds.forEach((participantId) => {
+                io.to(participantId).emit("message-deleted", { chatId: String(chatId), messageId });
+            });
+        });
+
+
     });
-
-
-};
-
+}
 module.exports = initSocket;
