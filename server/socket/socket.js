@@ -7,6 +7,8 @@ const Message = require("../models/Message");
 const initSocket = (httpServer) => {
 
     const onlineUsers = new Map();
+    const activeCalls = new Set();
+    const callSessions = new Map();
 
     const io = new Server(httpServer, {
         cors: {
@@ -17,6 +19,81 @@ const initSocket = (httpServer) => {
     const broadcastOnlineUsers = () => {
         const onlineUserIds = Array.from(onlineUsers.keys()); // unique user ids
         io.emit("online-users", onlineUserIds);
+    };
+
+    const toUserIdString = (id) => {
+        if (!id) return null;
+        if (typeof id === "object" && id._id) return String(id._id);
+        return String(id);
+    };
+
+    const relayToUser = (toUserId, event, data, fromUserId) => {
+        const targetId = toUserIdString(toUserId);
+        if (!targetId) return false;
+        io.to(targetId).emit(event, { ...data, fromUserId: toUserIdString(fromUserId) });
+        return true;
+    };
+
+    const isUserOnline = (userId) => onlineUsers.has(toUserIdString(userId));
+
+    const assertDirectChatPeers = async (chatId, userId, toUserId) => {
+        const chat = await Chat.findById(chatId).select("participants type").lean();
+        if (!chat) return { ok: false, message: "Chat not found" };
+        const ids = chat.participants.map((p) => p.toString());
+        const uid = toUserIdString(userId);
+        const tid = toUserIdString(toUserId);
+        if (!ids.includes(uid)) return { ok: false, message: "Not a participant" };
+        if (!ids.includes(tid)) return { ok: false, message: "User is not in this chat" };
+        if (uid === tid) return { ok: false, message: "Cannot call yourself" };
+        return { ok: true };
+    };
+
+    const normalizeSessionDescription = (raw) => {
+        if (!raw) return null;
+        if (typeof raw === "string") return { type: "offer", sdp: raw };
+        if (raw.type && raw.sdp) return { type: raw.type, sdp: raw.sdp };
+        if (raw.sdp?.type && raw.sdp?.sdp) return { type: raw.sdp.type, sdp: raw.sdp.sdp };
+        return null;
+    };
+
+    const normalizeIceCandidate = (raw) => {
+        if (raw === null) return null;
+        if (raw === undefined) return undefined;
+        const src = raw.candidate !== undefined ? raw : { candidate: raw };
+        return {
+            candidate: src.candidate ?? "",
+            sdpMid: src.sdpMid ?? null,
+            sdpMLineIndex: src.sdpMLineIndex ?? null,
+            ...(src.usernameFragment != null && { usernameFragment: src.usernameFragment }),
+        };
+    };
+
+    const getCallSession = (callId) => callSessions.get(String(callId));
+
+    const resolveCallPeerId = (callId, senderId, toUserId) => {
+        const session = getCallSession(callId);
+        const sender = toUserIdString(senderId);
+        if (!session) return toUserIdString(toUserId);
+        if (sender !== session.callerId && sender !== session.calleeId) return null;
+        const expectedPeer =
+            sender === session.callerId ? session.calleeId : session.callerId;
+        const requested = toUserIdString(toUserId);
+        return requested === expectedPeer ? requested : expectedPeer;
+    };
+
+    const endCallSession = (callId) => {
+        const session = getCallSession(callId);
+        if (!session) return;
+        activeCalls.delete(session.callerId);
+        activeCalls.delete(session.calleeId);
+        callSessions.delete(String(callId));
+    };
+
+    const markCallActive = (callId) => {
+        const session = getCallSession(callId);
+        if (!session) return;
+        activeCalls.add(session.callerId);
+        activeCalls.add(session.calleeId);
     };
 
     console.log("Socket initialized");
@@ -79,13 +156,13 @@ const initSocket = (httpServer) => {
             socket.join(String(chatId));
         });
 
-        socket.on("send-message", async ({ chatId, text }) => {
-            if (!chatId || !text) return;
+        socket.on("send-message", async ({ chatId, text, location }) => {
+            if (!chatId || (!text && !location)) return;
             const isParticipant = await Chat.findOne({ _id: chatId, participants: { $in: [socket.user._id] } });
 
             if (!isParticipant) return socket.emit("error", "You are not a participant of this chat");
 
-            const message = await Message.create({ chatId, senderId: socket.user._id, text });
+            const message = await Message.create({ chatId, senderId: socket.user._id, text, location, type: text ? "text" : "location" });
             await Chat.findByIdAndUpdate(chatId, { lastMessage: message._id, updatedAt: new Date() });
             const chat = await Chat.findById(chatId);
             const participantIds = chat.participants.map(participant => participant.toString());
@@ -134,6 +211,94 @@ const initSocket = (httpServer) => {
             await emitReceiptToParticipants(chatId, { type: "read", chatId: chatRoom, message });
         });
 
+        socket.on("call-user", async ({ toUserId, chatId, callType, callId }) => {
+            const calleeId = toUserIdString(toUserId);
+            const callKey = callId != null ? String(callId) : null;
+            if (!calleeId || !chatId || !callType || !callKey) return;
+
+            const check = await assertDirectChatPeers(chatId, userId, calleeId);
+            if (!check.ok) return socket.emit("error", check.message);
+
+            if (activeCalls.has(calleeId)) {
+                return socket.emit("call-busy", { callId: callKey, reason: "busy" });
+            }
+
+            if (!isUserOnline(calleeId)) {
+                return socket.emit("call-offline", { callId: callKey, reason: "offline" });
+            }
+
+            callSessions.set(callKey, {
+                callerId: userId,
+                calleeId,
+                chatId: String(chatId),
+            });
+
+            relayToUser(calleeId, "incoming-call", {
+                callId: callKey,
+                chatId: String(chatId),
+                callType,
+                fromUserName: socket.user.name,
+            }, userId);
+        });
+
+        socket.on("call-accepted", ({ toUserId, callId }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            if (!callKey || !peerId) return;
+            markCallActive(callKey);
+            relayToUser(peerId, "call-accepted", { callId: callKey }, userId);
+        });
+
+        socket.on("call-rejected", ({ toUserId, callId }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            if (!callKey || !peerId) return;
+            relayToUser(peerId, "call-rejected", { callId: callKey, reason: "rejected" }, userId);
+            endCallSession(callKey);
+        });
+
+        socket.on("call-ended", ({ toUserId, callId }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            if (!callKey || !peerId) return;
+            relayToUser(peerId, "call-ended", { callId: callKey, reason: "ended" }, userId);
+            endCallSession(callKey);
+        });
+
+        socket.on("call-busy", ({ toUserId, callId }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            if (!callKey || !peerId) return;
+            relayToUser(peerId, "call-busy", { callId: callKey, reason: "busy" }, userId);
+            endCallSession(callKey);
+        });
+
+        socket.on("webrtc-offer", ({ toUserId, callId, sdp, offer }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            const sessionDescription = normalizeSessionDescription(sdp ?? offer);
+            if (!callKey || !peerId || !sessionDescription) return;
+            relayToUser(peerId, "webrtc-offer", { callId: callKey, sdp: sessionDescription }, userId);
+        });
+
+        socket.on("webrtc-answer", ({ toUserId, callId, sdp, answer }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            const sessionDescription = normalizeSessionDescription(sdp ?? answer);
+            if (!callKey || !peerId || !sessionDescription) return;
+            relayToUser(peerId, "webrtc-answer", { callId: callKey, sdp: sessionDescription }, userId);
+        });
+
+        socket.on("ice-candidate", ({ toUserId, callId, candidate }) => {
+            const callKey = callId != null ? String(callId) : null;
+            const peerId = resolveCallPeerId(callKey, userId, toUserId);
+            if (!callKey || !peerId) return;
+            if (candidate === undefined) return;
+            const normalized = normalizeIceCandidate(candidate);
+            if (normalized === undefined) return;
+            relayToUser(peerId, "ice-candidate", { callId: callKey, candidate: normalized }, userId);
+        });
+
         socket.on("disconnect", () => {
             console.log(`User disconnected: ${socket.id}`);
             const sockets = onlineUsers.get(userId);
@@ -142,6 +307,19 @@ const initSocket = (httpServer) => {
             if (sockets.size === 0) {
                 onlineUsers.delete(userId);
                 broadcastOnlineUsers();
+
+                const activeCallKeys = [];
+                for (const [callKey, session] of callSessions.entries()) {
+                    if (session.callerId !== userId && session.calleeId !== userId) continue;
+                    activeCallKeys.push({
+                        callKey,
+                        peerId: session.callerId === userId ? session.calleeId : session.callerId,
+                    });
+                }
+                for (const { callKey, peerId } of activeCallKeys) {
+                    relayToUser(peerId, "call-ended", { callId: callKey, reason: "ended" }, userId);
+                    endCallSession(callKey);
+                }
             }
         });
 
