@@ -3,12 +3,14 @@ const mongoose = require('mongoose');
 const messageSchema = new mongoose.Schema({
     chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat' },
     senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    type: { type: String, enum: ["text", "location"], default: "text" },
+    type: { type: String, enum: ["text", "location", "image", "video"], default: "text" },
     text: String,
     readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     deliveredTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
+    image: String,
+    video: String,
     location: {
         lat: Number,
         lng: Number,

@@ -3,8 +3,15 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Chat = require("../models/Chat");
 const Message = require("../models/Message");
+const cloudinary = require("cloudinary");
 
 const initSocket = (httpServer) => {
+
+    cloudinary.config({
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
 
     const onlineUsers = new Map();
     const activeCalls = new Set();
@@ -156,13 +163,32 @@ const initSocket = (httpServer) => {
             socket.join(String(chatId));
         });
 
-        socket.on("send-message", async ({ chatId, text, location }) => {
-            if (!chatId || (!text && !location)) return;
+        socket.on("send-message", async ({ chatId, text, location, image, video }) => {
+            if (!chatId || (!text && !location && !image && !video)) return;
             const isParticipant = await Chat.findOne({ _id: chatId, participants: { $in: [socket.user._id] } });
 
             if (!isParticipant) return socket.emit("error", "You are not a participant of this chat");
 
-            const message = await Message.create({ chatId, senderId: socket.user._id, text, location, type: text ? "text" : "location" });
+            // if (image) {
+            //     const imageUrl = await cloudinary.uploader.upload(image, { resource_type: "image" }).then(result => result.secure_url).catch(error => {
+            //         console.error("Error uploading image:", error);
+            //         return null;
+            //     });
+            //     if (!imageUrl) return socket.emit("error", "Failed to upload image to Cloudinary");
+            //     image = imageUrl;
+            // }
+            // if (video) {
+            //     const videoUrl = await cloudinary.uploader.upload(video, { resource_type: "video" }).then(result => result.secure_url).catch(error => {
+            //         console.error("Error uploading video :", error);
+            //         return null;
+            //     });
+            //     if (!videoUrl) return socket.emit("error", "Failed to upload video to Cloudinary");
+            //     video = videoUrl;
+            // }
+
+            console.log("image, text, location", image, text, location);
+
+            const message = await Message.create({ chatId, senderId: socket.user._id, text, location, image, video, type: text ? "text" : location ? "location" : image ? "image" : "video" });
             await Chat.findByIdAndUpdate(chatId, { lastMessage: message._id, updatedAt: new Date() });
             const chat = await Chat.findById(chatId);
             const participantIds = chat.participants.map(participant => participant.toString());

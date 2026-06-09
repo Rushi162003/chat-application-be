@@ -18,6 +18,7 @@ app.use('/api/auth', require('./routes/authRoutes'));
 app.use("/api/users", require('./routes/userRoutes'));
 app.use("/api/chats", require('./routes/chatRoutes'));
 app.use("/api/keys", require('./routes/keyBundleRoutes'));
+app.use("/api/upload", require('./routes/uploadRoutes'));
 
 app.get('/', (req, res) => {
     res.send('Api running ');
